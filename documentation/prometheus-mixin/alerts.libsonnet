@@ -3,7 +3,7 @@
     groups+: [
       {
         name: 'prometheus',
-        rules: [
+        rules: std.prune([
           {
             alert: 'PrometheusBadConfig',
             expr: |||
@@ -60,26 +60,49 @@
               description: '{{ printf "%%.1f" $value }}%% errors while sending alerts from Prometheus %(prometheusName)s to Alertmanager {{$labels.alertmanager}}.' % $._config,
             },
           },
-          {
-            alert: 'PrometheusErrorSendingAlertsToAnyAlertmanager',
-            expr: |||
-              min without(alertmanager) (
-                rate(prometheus_notifications_errors_total{%(prometheusSelector)s}[5m])
-              /
-                rate(prometheus_notifications_sent_total{%(prometheusSelector)s}[5m])
-              )
-              * 100
-              > 3
-            ||| % $._config,
-            'for': '15m',
-            labels: {
-              severity: 'critical',
-            },
-            annotations: {
-              summary: 'Prometheus encounters more than 3% errors sending alerts to any Alertmanager.',
-              description: '{{ printf "%%.1f" $value }}%% minimum errors while sending alerts from Prometheus %(prometheusName)s to any Alertmanager.' % $._config,
-            },
-          },
+          if $._config.prometheusHAGroupLabels == '' then
+            {
+              alert: 'PrometheusErrorSendingAlertsToAnyAlertmanager',
+              expr: |||
+                min without (alertmanager) (
+                  rate(prometheus_notifications_errors_total{%(prometheusSelector)s}[5m])
+                /
+                  rate(prometheus_notifications_sent_total{%(prometheusSelector)s}[5m])
+                )
+                * 100
+                > 3
+              ||| % $._config,
+              'for': '15m',
+              labels: {
+                severity: 'critical',
+              },
+              annotations: {
+                summary: 'Prometheus encounters more than 3% errors sending alerts to any Alertmanager.',
+                description: '{{ printf "%%.1f" $value }}%% minimum errors while sending alerts from Prometheus %(prometheusName)s to any Alertmanager.' % $._config,
+              },
+            }
+          else
+            {
+              alert: 'PrometheusErrorSendingAlertsToAnyAlertmanager',
+              expr: |||
+                min by (%(prometheusHAGroupLabels)s) (
+                  rate(prometheus_notifications_errors_total{%(prometheusSelector)s}[5m])
+                /
+                  rate(prometheus_notifications_sent_total{%(prometheusSelector)s}[5m])
+                )
+                * 100
+                > 3
+              ||| % $._config,
+              'for': '15m',
+              labels: {
+                severity: 'critical',
+              },
+              annotations: {
+                summary: 'Each Prometheus server in an HA group encounters more than 3% errors sending alerts to any Alertmanager.',
+                description: '{{ printf "%%.1f" $value }}%% minimum errors while sending alerts from any Prometheus server in HA group %(prometheusHAGroupName)s to any Alertmanager.' % $._config,
+              },
+            }
+          ,
           {
             alert: 'PrometheusNotConnectedToAlertmanagers',
             expr: |||
@@ -144,6 +167,29 @@
             annotations: {
               summary: 'Prometheus is not ingesting samples.',
               description: 'Prometheus %(prometheusName)s is not ingesting samples.' % $._config,
+            },
+          },
+          if $._config.prometheusHAGroupLabels != '' then {
+            alert: 'PrometheusHAGroupNotIngestingSamples',
+            expr: |||
+              max by (%(prometheusHAGroupLabels)s) (
+                rate(prometheus_tsdb_head_samples_appended_total{%(prometheusSelector)s}[5m])
+              and
+                (
+                  sum without(scrape_job) (prometheus_target_metadata_cache_entries{%(prometheusSelector)s}) > 0
+                or
+                  sum without(rule_group) (prometheus_rule_group_rules{%(prometheusSelector)s}) > 0
+                )
+              )
+              <= 0
+            ||| % $._config,
+            'for': '10m',
+            labels: {
+              severity: 'critical',
+            },
+            annotations: {
+              summary: 'A whole Prometheus HA group is not ingesting samples.',
+              description: 'None of the Prometheus instances in HA group %(prometheusHAGroupName)s is ingesting any samples.' % $._config,
             },
           },
           {
@@ -281,7 +327,57 @@
               description: 'Prometheus %(prometheusName)s has dropped {{ printf "%%.0f" $value }} targets because the number of targets exceeded the configured target_limit.' % $._config,
             },
           },
-        ],
+          // Both the following critical alerts, PrometheusHAGroupDown and
+          // PrometheusHAGroupCrashlooping, fire if a whole HA group is
+          // unhealthy. It is implied that a generic warning alert is in place
+          // for individual instances being down or crashlooping.
+          if $._config.prometheusHAGroupLabels != '' then {
+            alert: 'PrometheusHAGroupDown',
+            expr: |||
+              (
+                count by (%(prometheusHAGroupLabels)s) (
+                  avg_over_time(up{%(prometheusSelector)s}[5m]) < 0.5
+                )
+              /
+                count by (%(prometheusHAGroupLabels)s) (
+                  up{%(prometheusSelector)s}
+                )
+              )
+              > 0.5
+            ||| % $._config,
+            'for': '5m',
+            labels: {
+              severity: 'critical',
+            },
+            annotations: {
+              summary: 'More than half of the Prometheus instances within the same HA group are down.',
+              description: '{{ $value | humanizePercentage }} of Prometheus instances within the %(prometheusHAGroupName)s HA group have been up for less than half of the last 5m.' % $._config,
+            },
+          },
+          if $._config.prometheusHAGroupLabels != '' then {
+            alert: 'PrometheusHAGroupCrashlooping',
+            expr: |||
+              (
+                count by (%(prometheusHAGroupLabels)s) (
+                  changes(process_start_time_seconds{%(prometheusSelector)s}[30m]) > 4
+                )
+              /
+                count by (%(prometheusHAGroupLabels)s) (
+                  up{%(prometheusSelector)s}
+                )
+              )
+              > 0.5
+            ||| % $._config,
+            'for': '5m',
+            labels: {
+              severity: 'critical',
+            },
+            annotations: {
+              summary: 'More than half of the Prometheus instances within the same HA group are crashlooping.',
+              description: '{{ $value | humanizePercentage }} of Prometheus instances within the %(prometheusHAGroupName)s HA group have restarted at least 5 times in the last 30m.' % $._config,
+            },
+          },
+        ]),
       },
     ],
   },
