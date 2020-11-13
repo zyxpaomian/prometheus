@@ -5,7 +5,9 @@
 set -e
 set -u
 
-if ! [[ "$0" =~ "scripts/build_react_app.sh" ]]; then
+echo $0
+
+if ! [[ "$0" =~ "D:\Coding\myprometheus\scripts\build_react_app.sh" ]]; then
 	echo "must be run from repository root"
 	exit 255
 fi
